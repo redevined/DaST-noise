@@ -23,6 +23,9 @@ import torchvision.utils as vutils
 import torch.utils.data.sampler as sp
 
 from net import Net_s, Net_m, Net_l
+from vgg import VGG
+from resnet import ResNet50, ResNet18, ResNet34
+
 SEED = 10000
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
@@ -30,6 +33,7 @@ np.random.seed(SEED)
 random.seed(10000)
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--model', type=str, required=True, help='path to trained substitute model')
 parser.add_argument('--workers', type=int, help='number of data loading\
     workers', default=2)
 parser.add_argument('--cuda', action='store_true', help='enables cuda')
@@ -40,9 +44,10 @@ parser.add_argument('--mode', type=str, help='use which model to generate\
     small imitation network. ')
 parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('--target', action='store_true', help='manual seed')
+parser.add_argument('--dataset', type=str, default='mnist')
 
 opt = parser.parse_args()
-# print(opt)
+print(opt)
 
 if opt.manualSeed is None:
     opt.manualSeed = random.randint(1, 10000)
@@ -55,19 +60,52 @@ cudnn.benchmark = True
 if torch.cuda.is_available() and not opt.cuda:
     print("WARNING: You have a CUDA device, so you should probably run with \
          --cuda")
+device = torch.device("cuda:0" if opt.cuda else "cpu")
 
-testset = torchvision.datasets.MNIST(root='/data/dataset/', train=False,
-                                     download=True,
-                                     transform=transforms.Compose([
-                                        transforms.ToTensor(),
-                                     ]))
+if opt.dataset == 'mnist' :
+    testset = torchvision.datasets.MNIST(root='dataset/', train=False,
+                                        download=True,
+                                        transform=transforms.Compose([
+                                            transforms.ToTensor(),
+                                        ]))
+    attack_net = Net_l().to(device)
+    state_dict = torch.load(opt.model)
+    attack_net = nn.DataParallel(attack_net)
+    attack_net.load_state_dict(state_dict)
+
+    target_net = Net_m().to(device)
+    state_dict = torch.load(
+        'pretrained/net_m.pth')
+    target_net.load_state_dict(state_dict)
+    target_net.eval()
+
+elif opt.dataset == 'cifar10':
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+    testset = torchvision.datasets.CIFAR10(root='dataset/', train=False,
+                                        download=True,
+                                        transform=transforms.Compose([
+                                                # transforms.Pad(2, padding_mode="symmetric"),
+                                                transforms.ToTensor(),
+                                                # transforms.RandomCrop(32, 4),
+                                                normalize,
+                                        ]))
+    attack_net = ResNet50().to(device)
+    state_dict = torch.load(opt.model)
+    attack_net = nn.DataParallel(attack_net)
+    attack_net.load_state_dict(state_dict)
+
+    target_net = VGG('VGG16').to(device)
+    state_dict = torch.load(
+        'pretrained/better_vgg16_cifar10.pth')
+    target_net.load_state_dict(state_dict, strict = False)
+    target_net.eval()
 
 data_list = [i for i in range(0, 10000)]
 testloader = torch.utils.data.DataLoader(testset, batch_size=1,
                                          sampler = sp.SubsetRandomSampler(data_list), num_workers=2)
 
 
-device = torch.device("cuda:0" if opt.cuda else "cpu")
 
 # L2 = foolbox.distances.MeanAbsoluteDistance()
 
@@ -185,24 +223,23 @@ def test_adver(net, tar_net, attack, target):
     print('l2 distance:  %.4f ' % (total_L2_distance / total))
 
 
-target_net = Net_m().to(device)
-state_dict = torch.load(
-    'pretrained/net_m.pth')
-target_net.load_state_dict(state_dict)
-target_net.eval()
+# target_net = Net_m().to(device)
+# state_dict = torch.load(
+#     'pretrained/net_m.pth')
+# target_net.load_state_dict(state_dict)
+# target_net.eval()
 
-if opt.mode == 'black':
-    attack_net = Net_l().to(device)
-    state_dict = torch.load(
-        'pretrained/net_l.pth')
-    attack_net.load_state_dict(state_dict)
-elif opt.mode == 'white':
-    attack_net = target_net
-elif opt.mode == 'dast':
-    attack_net = Net_l().to(device)
-    state_dict = torch.load(
-        'saved_model_2/netD_epoch_670.pth')
-    attack_net = nn.DataParallel(attack_net)
-    attack_net.load_state_dict(state_dict)
+# if opt.mode == 'black':
+#     attack_net = Net_l().to(device)
+#     state_dict = torch.load(
+#         'pretrained/net_l.pth')
+#     attack_net.load_state_dict(state_dict)
+# elif opt.mode == 'white':
+#     attack_net = target_net
+# elif opt.mode == 'dast':
+#     attack_net = Net_l().to(device)
+#     state_dict = torch.load(opt.model)
+#     attack_net = nn.DataParallel(attack_net)
+#     attack_net.load_state_dict(state_dict)
 
 test_adver(attack_net, target_net, opt.adv, opt.target)

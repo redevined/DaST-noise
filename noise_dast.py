@@ -46,24 +46,27 @@ class Logger(object):
     def flush(self):
 	    pass
 
-# sys.stdout = Logger('imitation_network_model.log', sys.stdout)
+# sys.stdout = Logger('imitation_network_model_noise.log', sys.stdout)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
 parser.add_argument('--batchSize', type=int, default=500, help='input batch size')
 parser.add_argument('--dataset', type=str, default='azure')
-parser.add_argument('--niter', type=int, default=2000, help='number of epochs to train for')
+parser.add_argument('--niter', type=int, default=600, help='number of epochs to train for')
 parser.add_argument('--lr', type=float, default=0.0001, help='learning rate, default=0.0002')
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
-parser.add_argument('--cuda', default=True, action='store_true', help='enables cuda')
+parser.add_argument('--cuda', action='store_true', help='enables cuda')
 parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('--alpha', type=float, default=0.2, help='alpha')
-parser.add_argument('--beta', type=float, default=0.1, help='alpha')
-parser.add_argument('--G_type', type=int, default=1, help='iteration limitation')
-parser.add_argument('--save_folder', type=str, default='saved_model', help='alpha')
+parser.add_argument('--beta', type=float, default=0.1, help='tradeoff factor between matching label (beta=0) vs. output distribution (beta=1)')
+parser.add_argument('--data_dist', type=str, default='normal', help='distribution to sample input data from')
+parser.add_argument('--save_folder', type=str, default='saved_model_noise', help='alpha')
 
 opt = parser.parse_args()
 print(opt)
+
+# if not os.path.exists(opt.save_folder) :
+#     os.makedirs(opt.save_folder)
 
 if torch.cuda.is_available() and not opt.cuda:
     print("WARNING: You have a CUDA device, so you should probably run with --cuda")
@@ -113,6 +116,33 @@ elif opt.dataset == 'mnist':
         targeted=False)
     nc=1
 
+elif opt.dataset == 'cifar10':
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+    testset = torchvision.datasets.CIFAR10(root='dataset/', train=False,
+                                        download=True,
+                                        transform=transforms.Compose([
+                                                # transforms.Pad(2, padding_mode="symmetric"),
+                                                transforms.ToTensor(),
+                                                # transforms.RandomCrop(32, 4),
+                                                normalize,
+                                        ]))
+    netD = ResNet50().cuda()
+    netD = nn.DataParallel(netD)
+
+    original_net = VGG('VGG16').cuda()
+    state_dict = torch.load(
+        'pretrained/better_vgg16_cifar10.pth')
+    original_net.load_state_dict(state_dict, strict = False)
+    original_net = nn.DataParallel(original_net)
+    original_net.eval()
+
+    adversary_ghost = LinfBasicIterativeAttack(
+        netD, loss_fn=nn.CrossEntropyLoss(reduction="sum"), eps=0.25,
+        nb_iter=200, eps_iter=0.02, clip_min=0.0, clip_max=1.0,
+        targeted=False)
+    nc=1
+
 data_list = [i for i in range(6000, 8000)] # fast validation
 testloader = torch.utils.data.DataLoader(testset, batch_size=500,
                                          sampler = sp.SubsetRandomSampler(data_list), num_workers=2)
@@ -140,191 +170,34 @@ def cal_azure_proba(model, data):
     output = torch.from_numpy(output).cuda().float()
     return output
 
-
-class Loss_max(nn.Module):
-    def __init__(self):
-        super(Loss_max, self).__init__()
-        return
-
-    def forward(self, pred, truth, proba):
-        criterion_1 = nn.MSELoss()
-        criterion = nn.CrossEntropyLoss()
-        pred_prob = F.softmax(pred, dim=1)
-        loss = criterion(pred, truth) + criterion_1(pred_prob, proba) * opt.beta
-        # loss = criterion(pred, truth)
-        final_loss = torch.exp(loss * -1)
-        return final_loss
-
-class pre_conv(nn.Module):
-    def __init__(self, num_class):
-        super(pre_conv, self).__init__()
-        self.nf = 64
-        if opt.G_type == 1:
-            self.pre_conv = nn.Sequential(
-                nn.Conv2d(nz, self.nf * 2, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 2),
-                nn.LeakyReLU(0.2, inplace=True),
-
-                nn.ConvTranspose2d(self.nf * 2, self.nf * 2, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 2),
-                nn.LeakyReLU(0.2, inplace=True),
-
-                nn.ConvTranspose2d(self.nf * 2, self.nf * 2, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 2),
-                nn.LeakyReLU(0.2, inplace=True),
-
-                nn.ConvTranspose2d(self.nf * 2, self.nf * 2, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 2),
-                nn.LeakyReLU(0.2, inplace=True),
-
-                nn.ConvTranspose2d(self.nf * 2, self.nf * 2, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 2),
-                nn.LeakyReLU(0.2, inplace=True),
-
-                nn.ConvTranspose2d(self.nf * 2, self.nf * 2, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 2),
-                nn.LeakyReLU(0.2, inplace=True)
-            )
-        elif opt.G_type == 2:
-            self.pre_conv = nn.Sequential(
-                nn.Conv2d(self.nf * 8, self.nf * 8, 3, 1, round((self.shape[0]-1) / 2), bias=False),
-                nn.BatchNorm2d(self.nf * 8),
-                nn.ReLU(True),  # added
-
-                # nn.Conv2d(self.nf * 8, self.nf * 8, 3, 1, 1, bias=False),
-                # nn.BatchNorm2d(self.nf * 8),
-                # nn.ReLU(True),
-
-                nn.Conv2d(self.nf * 8, self.nf * 8, 3, 1, round((self.shape[0]-1) / 2), bias=False),
-                nn.BatchNorm2d(self.nf * 8),
-                nn.ReLU(True),
-
-                nn.Conv2d(self.nf * 8, self.nf * 4, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 4),
-                nn.ReLU(True),
-
-                nn.Conv2d(self.nf * 4, self.nf * 2, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 2),
-                nn.ReLU(True),
-
-                nn.Conv2d(self.nf * 2, self.nf, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(self.nf),
-                nn.ReLU(True),
-
-                nn.Conv2d(self.nf, self.shape[0], 3, 1, 1, bias=False),
-                nn.BatchNorm2d(self.shape[0]),
-                nn.ReLU(True),
-
-                nn.Conv2d(self.shape[0], self.shape[0], 3, 1, 1, bias=False),
-                # if self.shape[0] == 3:
-                #     nn.Tanh()
-                # else:
-                nn.Sigmoid()
-            )
-    def forward(self, input):
-        output = self.pre_conv(input)
-        return output
-
-pre_conv_block = []
-for i in range (10):
-    pre_conv_block.append(nn.DataParallel(pre_conv(10).cuda()))
-
-class Generator(nn.Module):
-    def __init__(self, num_class):
-        super(Generator, self).__init__()
-        self.nf = 64
-        self.num_class = num_class
-        if opt.G_type == 1:
-            self.main = nn.Sequential(
-                nn.Conv2d(self.nf * 2, self.nf * 4, 3, 1, 0, bias=False),
-                nn.BatchNorm2d(self.nf * 4),
-                nn.LeakyReLU(0.2, inplace=True),
-
-                # nn.Conv2d(self.nf * 4, self.nf * 4, 3, 1, 1, bias=False),
-                # nn.BatchNorm2d(self.nf * 4),
-                # nn.LeakyReLU(0.2, inplace=True),
-
-                nn.Conv2d(self.nf * 4, self.nf * 8, 3, 1, 0, bias=False),
-                nn.BatchNorm2d(self.nf * 8),
-                nn.LeakyReLU(0.2, inplace=True),
-
-                # nn.Conv2d(self.nf * 8, self.nf * 8, 3, 1, 1, bias=False),
-                # nn.BatchNorm2d(self.nf * 8),
-                # nn.LeakyReLU(0.2, inplace=True),
-
-                nn.Conv2d(self.nf * 8, self.nf * 4, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 4),
-                nn.LeakyReLU(0.2, inplace=True),
-
-                nn.Conv2d(self.nf * 4, self.nf * 2, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 2),
-                nn.LeakyReLU(0.2, inplace=True),
-
-                nn.Conv2d(self.nf * 2, self.nf, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(self.nf),
-                nn.LeakyReLU(0.2, inplace=True),
-
-                nn.Conv2d(self.nf, nc, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(nc),
-                nn.LeakyReLU(0.2, inplace=True),
-
-                nn.Conv2d(nc, nc, 3, 1, 1, bias=False),
-                nn.Sigmoid()
-            )
-        elif opt.G_type == 2:
-            self.main = nn.Sequential(
-                nn.Conv2d(nz, self.nf * 2, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 2),
-                nn.ReLU(True),
-
-                nn.ConvTranspose2d(self.nf * 2, self.nf * 2, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 2),
-                nn.ReLU(True),
-
-                nn.ConvTranspose2d(self.nf * 2, self.nf * 4, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 4),
-                nn.ReLU(True),
-
-                nn.ConvTranspose2d(self.nf * 4, self.nf * 4, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 4),
-                nn.ReLU(True),
-
-                nn.ConvTranspose2d(self.nf * 4, self.nf * 8, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 8),
-                nn.ReLU(True),
-
-                nn.ConvTranspose2d(self.nf * 8, self.nf * 8, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 8),
-                nn.ReLU(True),
-
-                nn.Conv2d(self.nf * 8, self.nf * 8, 3, 1, 1, bias=False),
-                nn.BatchNorm2d(self.nf * 8),
-                nn.ReLU(True)
-            )
-    def forward(self, input):
-        output = self.main(input)
-        return output
-
-
-def chunks(arr, m):
-    n = int(math.ceil(arr.size(0) / float(m)))
-    return [arr[i:i + n] for i in range(0, arr.size(0), n)]
-
-netG = Generator(10).cuda()
-netG.apply(weights_init)
-netG = nn.DataParallel(netG)
+# Sample random data from distribution
+def sample_random_distribution(*dims) :
+    # Normal distribution
+    if opt.data_dist == 'normal' :
+        x = torch.randn(*dims)
+        if opt.dataset == 'cifar10' :
+            x = x * 0.22 + 0.45
+        return x
+    # Uniform distribution
+    elif opt.data_dist == 'uniform' :
+        return torch.rand(*dims)
+    # Bernoulli distribution with fixed p = 0.5
+    elif opt.data_dist == 'bernoulli' :
+        p = .5
+        return torch.bernoulli(p * torch.ones(*dims))
+    # Bernoulli distribution with p varying between 0.05 and 0.95 for every image
+    elif opt.data_dist == 'varying_bernoulli' :
+        p = torch.rand(dims[0]) * .9 + .05
+        p = p.view([-1] + [1] * (len(dims) - 1))
+        return torch.bernoulli(p * torch.ones(*dims))
+    else :
+        raise NotImplementedError(opt.data_dist)
 
 criterion = nn.CrossEntropyLoss()
-criterion_max = Loss_max()
 
 # setup optimizer
 optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 # optimizerD =  optim.SGD(netD.parameters(), lr=opt.lr, momentum=0.9, weight_decay=5e-4)
-optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-# optimizerG =  optim.SGD(netG.parameters(), lr=opt.lr, momentum=0.9, weight_decay=5e-4)
-optimizer_block = []
-for i in range(10):
-    optimizer_block.append(optim.Adam(pre_conv_block[i].parameters(), lr=opt.lr, betas=(opt.beta1, 0.999)))
 
 with torch.no_grad():
     correct_netD = 0.0
@@ -372,6 +245,9 @@ del inputs, labels, adv_inputs_ghost
 torch.cuda.empty_cache()
 gc.collect()
 
+# Image dimensions
+dims = next(iter(testloader))[0].size()[1:]
+
 batch_num = 1000
 best_accuracy = 0.0
 best_att = 0.0
@@ -384,22 +260,8 @@ for epoch in range(opt.niter):
         ############################
         # (1) Update D network:
         ###########################
-        noise = torch.randn(opt.batchSize, nz, 1, 1, device=device).cuda()
-        noise_chunk = chunks(noise, 10)
-        for i in range(len(noise_chunk)):
-            tmp_data = pre_conv_block[i](noise_chunk[i])
-            gene_data = netG(tmp_data)
-            # gene_data = netG(noise_chunk[i], i)
-            label = torch.full((noise_chunk[i].size(0),), i).cuda()
-            if i == 0:
-                data = gene_data
-                set_label = label
-            else:
-                data = torch.cat((data, gene_data), 0)
-                set_label = torch.cat((set_label, label), 0)
-        index = torch.randperm(set_label.size()[0])
-        data = data[index]
-        set_label = set_label[index]
+        # Generate random data
+        data = sample_random_distribution(opt.batchSize, *dims).to(device)
 
         # obtain the output label of T
         with torch.no_grad():
@@ -418,7 +280,7 @@ for epoch in range(opt.niter):
         prob = F.softmax(output, dim=1)
         # print(torch.sum(outputs) / 500.)
         errD_prob = mse_loss(prob, outputs, reduction='mean')
-        errD_fake = criterion(output, label) + errD_prob * opt.beta
+        errD_fake = criterion(output, label) * (1 - opt.beta) + errD_prob * opt.beta
         D_G_z1 = errD_fake.mean().item()
         errD_fake.backward()
 
@@ -427,28 +289,10 @@ for epoch in range(opt.niter):
 
         del output, errD_fake
 
-        ############################
-        # (2) Update G network:
-        ###########################
-        netG.zero_grad()
-        for i in range(10):
-            pre_conv_block[i].zero_grad()
-        output = netD(data)
-        loss_imitate = criterion_max(pred=output, truth=label, proba=outputs)
-        loss_diversity = criterion(output, set_label.squeeze().long())
-        errG = opt.alpha * loss_diversity + loss_imitate
-        if loss_diversity.item() <= 0.1:
-            opt.alpha = loss_diversity.item()
-        errG.backward()
-        D_G_z2 = errG.mean().item()
-        optimizerG.step()
-        for i in range(10):
-            optimizer_block[i].step()
-
         if (ii % 40) == 0:
-            print('[%d/%d][%d/%d] D: %.4f D_prob: %.4f G: %.4f D(G(z)): %.4f / %.4f loss_imitate: %.4f loss_diversity: %.4f'
+            print('[%d/%d][%d/%d] D: %.4f D_prob: %.4f D(G(z)): %.4f'
                 % (epoch, opt.niter, ii, batch_num,
-                    errD.item(), errD_prob.item(), errG.item(), D_G_z1, D_G_z2, loss_imitate.item(), loss_diversity.item()))
+                    errD.item(), errD_prob.item(), D_G_z1))
 
 
     ################################################
@@ -479,8 +323,6 @@ for epoch in range(opt.niter):
     if best_att < (total - correct_ghost):
         torch.save(netD.state_dict(),
                     opt.save_folder + '/netD_epoch_%d.pth' % (epoch))
-        torch.save(netG.state_dict(),
-                    opt.save_folder + '/netG_epoch_%d.pth' % (epoch))
         best_att = (total - correct_ghost)
         print('This is the best model')
     # worksheet.write(epoch, 0, (correct_ghost.float() / total).item())
@@ -508,10 +350,8 @@ for epoch in range(opt.niter):
         if best_accuracy < correct_netD:
             torch.save(netD.state_dict(),
                        opt.save_folder + '/netD_epoch_%d.pth' % (epoch))
-            torch.save(netG.state_dict(),
-                       opt.save_folder + '/netG_epoch_%d.pth' % (epoch))
             best_accuracy = correct_netD
             print('This is the best model')
-    # worksheet.write(epoch, 1, (correct_netD.float() / total).item())
+#     worksheet.write(epoch, 1, (correct_netD.float() / total).item())
 # workbook.save('imitation_network_saved_azure.xls')
 
